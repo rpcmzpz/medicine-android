@@ -23,7 +23,7 @@
 |---|---|---|
 | <img src="docs/screenshots/04-checkout-rx.png" width="230"/> | <img src="docs/screenshots/05-payment.png" width="230"/> | <img src="docs/screenshots/06-order-list.png" width="230"/> |
 
-订单详情：支付后进入「待审核」，药师审核通过后页面**无需手动刷新**自动变为「待配药」。
+订单详情：含处方药的订单支付后进入「待审核」，药师审核通过后页面**无需手动刷新**自动变为「待配药」。
 
 <img src="docs/screenshots/07-order-detail.png" width="230"/>
 
@@ -32,9 +32,9 @@
 | 模块 | 已实现 |
 |---|---|
 | 认证 | 登录、JWT Bearer 自动注入、401 自动清理会话并退回登录页、退出登录清空返回栈 |
-| 药品列表 | 分页加载（20 条/页）、触底自动加载、下拉刷新、库存/售罄状态、处方药角标 |
+| 药品列表 | 分页加载（20 条/页）、触底自动加载、下拉刷新、已售数量、处方药角标、图片缺失时用药品名首字占位 |
 | 药品详情 | 价格与原价、库存、OTC/处方药标签、批准文号、说明书、用户评价、数量步进器、加入购物车 |
-| 购物车 | 勾选状态、数量增减（乐观更新 + 400ms 防抖）、删除、金额实时汇总、含处方药提示 |
+| 购物车 | 数量增减（乐观更新 + 400ms 防抖）、删除、金额实时汇总、含处方药提示 |
 | 结算 | 收货地址切换/新增、订单备注、处方卡片、商品/运费/实付明细、提交前校验 |
 | 处方 | 系统 Photo Picker 多选（最多 9 张，**无需存储权限**）、multipart 流式上传、缩略图预览、可重新上传 |
 | 订单 | 6 个状态筛选、分页、下拉刷新、订单详情、支付（微信/支付宝/银联）、取消订单、确认收货 |
@@ -103,7 +103,7 @@ app/src/main/java/com/zhuhai/medicine/
 │   ├── model/                    # ApiResponse、Auth、Medicine、Cart、Order、Prescription、User
 │   ├── remote/
 │   │   ├── ApiClient.kt          # OkHttp（普通请求 / 上传请求两个 client）
-│   │   ├── ApiService.kt         # 21 个接口声明
+│   │   ├── ApiService.kt         # 24 个接口声明
 │   │   ├── ApiResult.kt
 │   │   ├── ApiCall.kt            # 异常 → ApiResult
 │   │   └── AuthInterceptor.kt    # 注入 Bearer，401 清会话
@@ -158,7 +158,8 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 ### 5. 两个必须知道的联调前提
 
 - **明文 HTTP**：Android 9+ 默认禁止 cleartext。工程内 `res/xml/network_security_config.xml`
-  只对 `10.0.2.2` 与局域网段放行，未全局关闭。
+  只放行了 `10.0.2.2` / `localhost` / `127.0.0.1`，没有全局关闭；**真机调试时要把电脑的局域网 IP
+  加进这个文件**，否则请求会被系统直接拦截（表现为 `CLEARTEXT communication not permitted`）。
 - **Android 16（API 36+）的 `ACCESS_LOCAL_NETWORK`**：不声明该权限时，发往局域网的 SYN 会被
   系统静默丢弃，表现为 OkHttp 10 秒超时，而 `ping` / `nc` 却通（shell uid 不受限）。
   工程已在 Manifest 声明并在列表页首次进入时申请。
@@ -183,7 +184,7 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 
 ## 测试
 
-24 个 JVM 单元测试，不需要模拟器：
+24 个 JVM 单元测试（业务相关 17 个，另有 6 个 Kotlin 语法练习、1 个模板用例），全部通过，不需要模拟器：
 
 ```bash
 ./gradlew :app:testDebugUnitTest
@@ -191,9 +192,9 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 
 覆盖三类容易出错、又不需要真机的逻辑：
 
-- **JSON 映射**：蛇形/驼峰两种键、`data: null` 的写接口、金额 `BigDecimal`、日期字符串；
+- **JSON 映射**：蛇形/驼峰两种键、`data: null` 的写接口、金额精度、日期字符串；
 - **`ApiCall` 分支**：HTTP 401 → `Unauthorized`、业务 code 非 200 → `BusinessError`、IO 异常 → `NetworkError`；
-- **状态机规则**：哪些状态可支付、可取消、可确认收货，与后端 `pay` / `cancel` / `confirm` 的校验保持一致。
+- **状态机规则**：哪些状态可支付、可取消，与后端 `pay` / `cancel` 的校验保持一致。
 
 ## 已知限制
 
