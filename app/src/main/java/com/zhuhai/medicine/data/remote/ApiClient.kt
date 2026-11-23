@@ -12,6 +12,8 @@ import java.util.concurrent.TimeUnit
  *
  * 全 App 只创建一次，别在 Activity/Composable 里重复 new，否则每次都会重建
  * 连接池和线程池，既浪费内存又拿不到连接复用。
+ *
+ * 这里维护**两个** client，原因见 [uploadClient]。
  */
 object ApiClient {
 
@@ -27,45 +29,63 @@ object ApiClient {
 
     private const val BASE_URL = "$ORIGIN/"
 
-    /**
-     * 请求日志拦截器。
-     * debug 打全量（含请求体、响应体、Header），release 直接关闭——
-     * 登录请求体里带明文密码，线上绝不能进日志。
-     */
-    private val loggingInterceptor = HttpLoggingInterceptor().apply {
-        level = if (BuildConfig.DEBUG) {
-            HttpLoggingInterceptor.Level.BODY
-        } else {
-            HttpLoggingInterceptor.Level.NONE
-        }
+    private fun logLevel(body: Boolean): HttpLoggingInterceptor.Level = when {
+        !BuildConfig.DEBUG -> HttpLoggingInterceptor.Level.NONE
+        body -> HttpLoggingInterceptor.Level.BODY
+        else -> HttpLoggingInterceptor.Level.BASIC
     }
 
     /**
-     * OkHttp 客户端。`by lazy` 表示第一次被访问时才初始化，
-     * 之后直接复用同一个实例（默认 SYNCHRONIZED 模式，多线程安全）。
+     * 普通 JSON 请求的客户端。
+     *
+     * 拦截器顺序即执行顺序（先加的是外层）：Auth 在前，日志才能看到加好的 Authorization 头。
      */
-    private val okHttpClient: OkHttpClient by lazy {
+    private val apiClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)   // 建立 TCP 连接的上限
             .readTimeout(15, TimeUnit.SECONDS)      // 等响应数据的上限
             .writeTimeout(15, TimeUnit.SECONDS)     // 上传请求体的上限
-            // 顺序即执行顺序（先加的是外层）：Auth 在前，日志才能看到加好的 Authorization 头
             .addInterceptor(AuthInterceptor())
-            .addInterceptor(loggingInterceptor)
+            .addInterceptor(HttpLoggingInterceptor().apply { level = logLevel(body = true) })
             .build()
     }
 
-    /** Retrofit 实例。Converter 负责 JSON <-> Kotlin data class 的转换。 */
-    private val retrofit: Retrofit by lazy {
-        Retrofit.Builder()
-            .baseUrl(BASE_URL)
-            .client(okHttpClient)
-            .addConverterFactory(GsonConverterFactory.create())
+    /**
+     * 上传处方图片专用的客户端。
+     *
+     * **为什么不能用 BODY 日志**：HttpLoggingInterceptor 记录请求体时会把 body
+     * 整个 `writeTo(buffer)` 一遍。普通 JSON body 可以重放，但我们上传用的是
+     * `StreamRequestBody`（InputStream 只能读一次）——日志先读完，真正发请求时
+     * 流已经关了，OkHttp 报 `IOException: Stream Closed`。
+     *
+     * 所以这里降到 BASIC：仍然能看到请求行、状态码、耗时，只是不打印二进制内容。
+     * 顺带把写超时放宽到 60 秒，给多张大图留出上传时间。
+     */
+    private val uploadClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .addInterceptor(AuthInterceptor())
+            .addInterceptor(HttpLoggingInterceptor().apply { level = logLevel(body = false) })
             .build()
     }
+
+    /** Converter 负责 JSON <-> Kotlin data class 的转换。 */
+    private fun retrofit(client: OkHttpClient): Retrofit =
+        Retrofit.Builder()
+            .baseUrl(BASE_URL)
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
 
     /** 接口代理对象。Retrofit 用动态代理生成实现，调用方法即发起请求。 */
     val api: ApiService by lazy {
-        retrofit.create(ApiService::class.java)
+        retrofit(apiClient).create(ApiService::class.java)
+    }
+
+    /** 同一个接口，但走「不打印 body」的 client；只有 multipart 上传该用它 */
+    val uploadApi: ApiService by lazy {
+        retrofit(uploadClient).create(ApiService::class.java)
     }
 }

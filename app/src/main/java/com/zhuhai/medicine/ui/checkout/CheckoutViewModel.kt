@@ -11,12 +11,14 @@ import com.zhuhai.medicine.data.model.CreateOrderResult
 import com.zhuhai.medicine.data.remote.ApiResult
 import com.zhuhai.medicine.data.repository.CartRepository
 import com.zhuhai.medicine.data.repository.OrderRepository
+import com.zhuhai.medicine.data.repository.PrescriptionRepository
 import com.zhuhai.medicine.data.repository.UserRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import okhttp3.MultipartBody
 import java.math.BigDecimal
 
 data class CheckoutUiState(
@@ -34,7 +36,12 @@ data class CheckoutUiState(
     val showAddressPicker: Boolean = false,
     val showAddressForm: Boolean = false,
     val isSavingAddress: Boolean = false,
-    val addressError: String? = null
+    val addressError: String? = null,
+    /** 本地相册 Uri（content://...），只用于上传前后给用户看缩略图 */
+    val prescriptionImageUris: List<String> = emptyList(),
+    /** 上传成功后拿到的处方 id，下单时必须带给后端 */
+    val prescriptionId: Long? = null,
+    val isUploadingPrescription: Boolean = false
 ) {
     val selectedAddress: Address?
         get() = addresses.firstOrNull { it.addressId == selectedAddressId }
@@ -46,17 +53,27 @@ data class CheckoutUiState(
 
     val totalQuantity: Int get() = items.sumOf { it.quantity }
 
-    /** 处方药依赖 b13 的处方上传，先明确挡住，不做"先下单再说" */
+    /** 购物车里是否含处方药（drug_type=1） */
     val hasPrescription: Boolean get() = items.any { it.isPrescription }
 
+    /**
+     * 含处方药时**必须先上传处方**才能提交。
+     * 后端 createOrder 只负责把 prescription_id 关联到订单上，不会校验「处方传了没」，
+     * 所以这道门禁必须由客户端把住——否则会造出一张永远等不到审核的处方单。
+     */
     val canSubmit: Boolean
-        get() = items.isNotEmpty() && selectedAddressId != null && !isSubmitting && !hasPrescription
+        get() = items.isNotEmpty() &&
+            selectedAddressId != null &&
+            !isSubmitting &&
+            !isUploadingPrescription &&
+            (!hasPrescription || prescriptionId != null)
 }
 
 class CheckoutViewModel @JvmOverloads constructor(
     private val cartRepository: CartRepository = CartRepository(),
     private val userRepository: UserRepository = UserRepository(),
-    private val orderRepository: OrderRepository = OrderRepository()
+    private val orderRepository: OrderRepository = OrderRepository(),
+    private val prescriptionRepository: PrescriptionRepository = PrescriptionRepository()
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(CheckoutUiState())
@@ -113,6 +130,59 @@ class CheckoutViewModel @JvmOverloads constructor(
 
     fun updateRemark(text: String) {
         _uiState.update { it.copy(remark = text) }
+    }
+
+    /**
+     * 上传处方。
+     *
+     * `parts` 由 UI 层用 ContentResolver 转好再传进来 —— ViewModel 不持有 Context，
+     * 这样它仍然可以在纯 JVM 单测里 new 出来。
+     * 重新选图时旧 prescriptionId 会被覆盖：一张订单只会关联最后一次上传的处方。
+     */
+    fun uploadPrescription(parts: List<MultipartBody.Part>, previewUris: List<String>) {
+        if (_uiState.value.isUploadingPrescription) return
+        if (parts.isEmpty()) {
+            showMessage("没有读取到有效图片，请重新选择")
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                isUploadingPrescription = true,
+                prescriptionImageUris = previewUris,
+                // 重新上传期间先作废上一次的 id，避免用户拿旧处方下单
+                prescriptionId = null
+            )
+        }
+
+        viewModelScope.launch {
+            when (val result = prescriptionRepository.upload(parts)) {
+                is ApiResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            isUploadingPrescription = false,
+                            prescriptionId = result.data.prescriptionId
+                        )
+                    }
+                    showMessage("处方已上传，提交后由药师审核")
+                }
+
+                is ApiResult.BusinessError -> {
+                    _uiState.update { it.copy(isUploadingPrescription = false) }
+                    showMessage(result.message)
+                }
+
+                is ApiResult.NetworkError -> {
+                    _uiState.update { it.copy(isUploadingPrescription = false) }
+                    showMessage(result.message)
+                }
+
+                ApiResult.Unauthorized -> {
+                    _uiState.update { it.copy(isUploadingPrescription = false) }
+                    unauthorized()
+                }
+            }
+        }
     }
 
     fun openAddressPicker() {
@@ -228,8 +298,8 @@ class CheckoutViewModel @JvmOverloads constructor(
             showMessage("购物车为空，无法下单")
             return
         }
-        if (state.hasPrescription) {
-            showMessage("含处方药，处方上传在下一步支持")
+        if (state.hasPrescription && state.prescriptionId == null) {
+            showMessage("请先上传处方照片")
             return
         }
 
@@ -239,7 +309,9 @@ class CheckoutViewModel @JvmOverloads constructor(
             val request = CreateOrderRequest(
                 cartItemIds = state.items.map { it.cartId },
                 addressId = addressId,
-                remark = state.remark.trim().takeIf { it.isNotEmpty() }
+                remark = state.remark.trim().takeIf { it.isNotEmpty() },
+                // null 与空集合语义不同：null = 这单没有处方药，不必传
+                prescriptionIds = listOfNotNull(state.prescriptionId).takeIf { it.isNotEmpty() }
             )
             when (val result = orderRepository.create(request)) {
                 is ApiResult.Success -> _uiState.update {

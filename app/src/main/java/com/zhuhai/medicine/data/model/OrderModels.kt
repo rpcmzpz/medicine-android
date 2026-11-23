@@ -33,8 +33,8 @@ data class OrderSummary(
     /** 后端 cancel 接口只放行 status==0，这里提前对齐，别让用户点了才知道不行 */
     val canCancel: Boolean get() = orderStatus == 0
 
-    /** 待审核（处方单）也允许支付：后端 pay 放行 0 和 1 */
-    val canPay: Boolean get() = orderStatus == 0 || orderStatus == 1
+    /** 只有「待支付」能付款；处方单付款后才进「待审核」，别用 1 去放行 */
+    val canPay: Boolean get() = orderStatus == 0
 }
 
 val ORDER_STATUS_LABELS = arrayOf(
@@ -76,7 +76,9 @@ data class OrderDetail(
     val items: List<OrderLine> = emptyList(),
     val address: OrderAddress? = null,
     val payment: PaymentInfo? = null,
-    val delivery: DeliveryInfo? = null
+    val delivery: DeliveryInfo? = null,
+    /** 处方单才有；后端按 order_id 关联查出，含药师审核状态与驳回原因 */
+    val prescriptions: List<PrescriptionBrief> = emptyList()
 )
 
 data class OrderLine(

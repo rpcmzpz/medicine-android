@@ -160,10 +160,11 @@ class ApiModelMappingTest {
     }
 
     @Test
-    fun `待审核订单也允许支付 但只有待支付能取消`() {
+    fun `只有待支付能付款 取消同理`() {
+        // 状态机改动后：处方单也是先付款再审核，所以「待审核(1)」不能再放行支付，
+        // 否则会对同一单重复扣款（后端 pay 也只认 status==0）
         val auditing = OrderSummary(orderId = 1, orderStatus = 1)
-        assertTrue(auditing.canPay)
-        // 后端 cancel 只放行 status==0，客户端提前对齐
+        assertEquals(false, auditing.canPay)
         assertEquals(false, auditing.canCancel)
 
         val unpaid = OrderSummary(orderId = 2, orderStatus = 0)
@@ -173,6 +174,44 @@ class ApiModelMappingTest {
         val finished = OrderSummary(orderId = 3, orderStatus = 5)
         assertEquals(false, finished.canPay)
         assertEquals(false, finished.canCancel)
+    }
+
+    @Test
+    fun `订单详情能解析处方审核结果`() {
+        val json = """
+        {"code":200,"message":"success","data":{
+          "order_id":7,"order_no":"MEDMWT4JKJ8950B","order_status":2,
+          "order_status_label":"待配药","has_prescription":1,
+          "prescriptions":[{"prescription_id":1,"review_status":1,
+            "review_remark":"处方清晰，审核通过","reviewed_at":"2026-11-23T18:30:09",
+            "image_urls":["/uploads/a.png","/uploads/b.png"]}]
+        },"timestamp":1795429797000}
+        """.trimIndent()
+
+        val type = object : TypeToken<ApiResponse<OrderDetail>>() {}.type
+        val resp: ApiResponse<OrderDetail> = gson.fromJson(json, type)
+
+        val detail = resp.data!!
+        assertEquals(1, detail.prescriptions.size)
+        val rx = detail.prescriptions.first()
+        assertEquals(1L, rx.prescriptionId)
+        assertEquals("已通过", rx.statusLabel)
+        assertEquals(2, rx.imageUrls.size)
+        // 待配药 = 审核通过后的订单状态
+        assertEquals("待配药", ORDER_STATUS_LABELS[detail.orderStatus])
+    }
+
+    @Test
+    fun `处方状态三态标签与颜色语义`() {
+        assertEquals("待审核", PrescriptionBrief(reviewStatus = 0).statusLabel)
+        assertEquals("已通过", PrescriptionBrief(reviewStatus = 1).statusLabel)
+        assertEquals("已驳回", PrescriptionBrief(reviewStatus = 2).statusLabel)
+
+        assertTrue(PrescriptionBrief(reviewStatus = 0).isPending)
+        assertTrue(PrescriptionBrief(reviewStatus = 2).isRejected)
+        // 已通过既不是 pending 也不是 rejected，卡片上只显示状态、不显示提示语
+        assertEquals(false, PrescriptionBrief(reviewStatus = 1).isPending)
+        assertEquals(false, PrescriptionBrief(reviewStatus = 1).isRejected)
     }
 
     @Test

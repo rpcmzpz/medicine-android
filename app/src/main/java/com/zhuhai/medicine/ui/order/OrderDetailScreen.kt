@@ -1,5 +1,6 @@
 package com.zhuhai.medicine.ui.order
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -42,18 +44,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.zhuhai.medicine.data.model.OrderDetail
 import com.zhuhai.medicine.data.model.OrderLine
 import com.zhuhai.medicine.data.model.PaymentMethod
+import com.zhuhai.medicine.data.model.PrescriptionBrief
+import com.zhuhai.medicine.data.model.PrescriptionStatusPalette
 import com.zhuhai.medicine.ui.common.dateTimeText
 import com.zhuhai.medicine.ui.common.money
+import com.zhuhai.medicine.ui.common.resolveImageUrl
 
 /**
  * 订单详情。
@@ -149,6 +157,7 @@ private fun DetailContent(detail: OrderDetail) {
         StatusCard(detail)
         if (detail.address != null) AddressCard(detail)
         ItemsCard(detail.items)
+        if (detail.prescriptions.isNotEmpty()) PrescriptionCard(detail.prescriptions)
         AmountCard(detail)
         if (detail.payment != null) PaymentCard(detail)
         if (detail.delivery != null) DeliveryCard(detail)
@@ -242,6 +251,74 @@ private fun ItemsCard(items: List<OrderLine>) {
                     )
                 }
                 Text(text = "¥${line.subtotal.money()}", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrescriptionCard(prescriptions: List<PrescriptionBrief>) {
+    SectionCard(title = "处方信息") {
+        prescriptions.forEachIndexed { index, prescription ->
+            if (index > 0) {
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "处方 #${prescription.prescriptionId}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = prescription.statusLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(prescriptionStatusColor(prescription.reviewStatus))
+                )
+            }
+
+            if (prescription.imageUrls.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    prescription.imageUrls.forEach { path ->
+                        AsyncImage(
+                            // 后端存的是 /uploads/xxx.jpg，必须补站点根地址才能加载
+                            model = resolveImageUrl(path),
+                            contentDescription = "处方照片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                        )
+                    }
+                }
+            }
+
+            if (prescription.isPending) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "药师审核中，通过后自动进入配药，页面会自动刷新。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (prescription.isRejected && !prescription.reviewRemark.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "驳回原因：${prescription.reviewRemark}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
@@ -358,7 +435,7 @@ private fun ActionBar(
                 ) { Text("取消订单") }
             }
 
-            if (detail.orderStatus == 0 || detail.orderStatus == 1) {
+            if (detail.orderStatus == 0) {
                 Button(onClick = onPay, enabled = !isRunning) {
                     if (isRunning) {
                         CircularProgressIndicator(
@@ -450,6 +527,12 @@ private fun statusColor(status: Int): Color = when (status) {
     5 -> Color(0xFF2E7D32)
     6, 7 -> Color(0xFF757575)
     else -> Color(0xFF1565C0)
+}
+
+private fun prescriptionStatusColor(status: Int): Long = when (status) {
+    0 -> PrescriptionStatusPalette.PENDING
+    1 -> PrescriptionStatusPalette.APPROVED
+    else -> PrescriptionStatusPalette.REJECTED
 }
 
 @Composable

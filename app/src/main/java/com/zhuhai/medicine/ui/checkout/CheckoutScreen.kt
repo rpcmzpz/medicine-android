@@ -1,6 +1,10 @@
 package com.zhuhai.medicine.ui.checkout
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -48,7 +53,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,11 +64,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.zhuhai.medicine.data.model.Address
 import com.zhuhai.medicine.data.model.CartItem
 import com.zhuhai.medicine.data.model.CreateOrderResult
 import com.zhuhai.medicine.data.model.ORDER_STATUS_LABELS
 import com.zhuhai.medicine.ui.common.money
+import com.zhuhai.medicine.ui.common.toPrescriptionPart
 import java.math.BigDecimal
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -75,6 +85,25 @@ fun CheckoutScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+
+    /**
+     * 系统相册选择器（Photo Picker）。
+     *
+     * 用 PickMultipleVisualMedia 而不是「申请 READ_MEDIA_IMAGES + 自己查 MediaStore」：
+     * - Android 13+ 走系统 Photo Picker，**完全不需要任何存储权限**；
+     * - 13 以下自动回退到 ACTION_OPEN_DOCUMENT，同样不需要权限；
+     * - 用户只授予这次选中的几张图，App 看不到整个相册，隐私边界更干净。
+     * 回调里的 uris 是 content:// 授权 Uri，进程活着期间可直接读。
+     */
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 9)
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        // 坏 Uri（被删除/无权限）会在 toPrescriptionPart 里返回 null，这里直接过滤掉
+        val parts = uris.mapIndexedNotNull { index, uri -> context.toPrescriptionPart(uri, index) }
+        viewModel.uploadPrescription(parts, uris.map { it.toString() })
+    }
 
     LaunchedEffect(Unit) { viewModel.load() }
 
@@ -128,7 +157,12 @@ fun CheckoutScreen(
                     state = state,
                     onOpenPicker = viewModel::openAddressPicker,
                     onOpenForm = viewModel::openAddressForm,
-                    onRemarkChange = viewModel::updateRemark
+                    onRemarkChange = viewModel::updateRemark,
+                    onPickPrescription = {
+                        imagePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }
                 )
             }
         }
@@ -159,7 +193,8 @@ private fun CheckoutContent(
     state: CheckoutUiState,
     onOpenPicker: () -> Unit,
     onOpenForm: () -> Unit,
-    onRemarkChange: (String) -> Unit
+    onRemarkChange: (String) -> Unit,
+    onPickPrescription: () -> Unit
 ) {
     LazyColumn(
         contentPadding = PaddingValues(12.dp),
@@ -195,11 +230,7 @@ private fun CheckoutContent(
         }
         if (state.hasPrescription) {
             item {
-                Text(
-                    text = "购物车含处方药，处方上传在下一步（b13）支持，暂时无法提交。",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
+                PrescriptionSection(state = state, onPickImages = onPickPrescription)
             }
         }
         item { AmountSection(state) }
@@ -293,6 +324,98 @@ private fun GoodsSection(items: List<CartItem>) {
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PrescriptionSection(state: CheckoutUiState, onPickImages: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("处方信息", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.weight(1f))
+                when {
+                    state.isUploadingPrescription -> Text(
+                        text = "上传中…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    state.prescriptionId != null -> Text(
+                        text = "已上传",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF2E7D32),
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    else -> Text(
+                        text = "未上传",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "购物车含处方药，需上传处方照片（最多 9 张）。提交订单后由药师审核，审核通过才会配药。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (state.prescriptionImageUris.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    state.prescriptionImageUris.forEach { uri ->
+                        AsyncImage(
+                            // 本地 content:// Uri，Coil 直接能读，不需要先转成 File
+                            model = uri,
+                            contentDescription = "处方照片",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onPickImages,
+                enabled = !state.isUploadingPrescription
+            ) {
+                if (state.isUploadingPrescription) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("正在上传…")
+                } else {
+                    Text(if (state.prescriptionId != null) "重新上传处方" else "选择处方照片")
+                }
+            }
+
+            if (state.prescriptionId == null && !state.isUploadingPrescription) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "未上传处方时无法提交订单",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
