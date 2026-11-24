@@ -36,6 +36,15 @@ android {
         // 生成 BuildConfig，ApiClient 里用 BuildConfig.DEBUG 区分 debug / release
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            // JVM 单元测试里 android.util.Log 等框架方法没有实现，
+            // 默认直接抛 "Method i in android.util.Log not mocked"。
+            // 打开这个开关后它们返回默认值（Log 返回 0），业务代码可以照常打日志。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {

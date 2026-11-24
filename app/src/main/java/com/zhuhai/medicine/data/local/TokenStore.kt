@@ -17,7 +17,7 @@ import com.zhuhai.medicine.data.model.LoginResponse
  * 安全边界：本文件明文存储 token，因此已在 backup_rules / data_extraction_rules
  * 中排除该 prefs 文件，避免 token 被云备份或换机迁移带走。
  */
-object TokenStore {
+object TokenStore : TokenProvider {
 
     private const val PREF_NAME = "auth_prefs"
     private const val KEY_ACCESS = "access_token"
@@ -36,10 +36,10 @@ object TokenStore {
     }
 
     /** 当前 access_token；未登录时为 null */
-    val accessToken: String?
+    override val accessToken: String?
         get() = prefs.getString(KEY_ACCESS, null)
 
-    val refreshToken: String?
+    override val refreshToken: String?
         get() = prefs.getString(KEY_REFRESH, null)
 
     val userId: Long
@@ -67,7 +67,7 @@ object TokenStore {
     }
 
     /** refresh_token 换新 token 后只更新这一项，其余会话信息保留 */
-    fun updateAccessToken(token: String) {
+    override fun updateAccessToken(token: String) {
         prefs.edit().putString(KEY_ACCESS, token).apply()
     }
 

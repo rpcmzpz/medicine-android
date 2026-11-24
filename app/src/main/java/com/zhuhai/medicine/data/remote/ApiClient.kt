@@ -1,6 +1,8 @@
 package com.zhuhai.medicine.data.remote
 
+import android.util.Log
 import com.zhuhai.medicine.BuildConfig
+import com.zhuhai.medicine.data.model.RefreshRequest
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -39,6 +41,10 @@ object ApiClient {
      * 普通 JSON 请求的客户端。
      *
      * 拦截器顺序即执行顺序（先加的是外层）：Auth 在前，日志才能看到加好的 Authorization 头。
+     *
+     * [TokenAuthenticator] 挂在 **authenticator** 而不是 interceptor 上：
+     * 它的职责是「401 之后换 token 并重放」，OkHttp 对这件事有专门的回调位，
+     * 自己用 interceptor 实现要手动重试、还容易漏掉拦截器链。
      */
     private val apiClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -47,6 +53,7 @@ object ApiClient {
             .writeTimeout(15, TimeUnit.SECONDS)     // 上传请求体的上限
             .addInterceptor(AuthInterceptor())
             .addInterceptor(HttpLoggingInterceptor().apply { level = logLevel(body = true) })
+            .authenticator(TokenAuthenticator())
             .build()
     }
 
@@ -68,6 +75,25 @@ object ApiClient {
             .writeTimeout(60, TimeUnit.SECONDS)
             .addInterceptor(AuthInterceptor())
             .addInterceptor(HttpLoggingInterceptor().apply { level = logLevel(body = false) })
+            .authenticator(TokenAuthenticator())
+            .build()
+    }
+
+    /**
+     * 刷新 token 专用的 client——**完全独立的一条链路**。
+     *
+     * ⚠️ 这里绝对不能加 AuthInterceptor / TokenAuthenticator：
+     * 刷新接口自己返回 401 时，Authenticator 会被再次触发去刷新，刷新请求又 401……
+     * 就是无限递归。所以刷新请求只发一次，失败就返回 null，让上层把 401 透出去。
+     *
+     * 超时也比业务请求短：续期是「挡在用户操作前面」的一步，
+     * 卡住 5 秒还没结果就不如直接让用户重新登录。
+     */
+    private val refreshClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .addInterceptor(HttpLoggingInterceptor().apply { level = logLevel(body = false) })
             .build()
     }
 
@@ -88,4 +114,44 @@ object ApiClient {
     val uploadApi: ApiService by lazy {
         retrofit(uploadClient).create(ApiService::class.java)
     }
+
+    /** 刷新 token 的同步接口；走独立的 refreshClient，不带任何鉴权逻辑 */
+    val refreshApi: AuthRefreshApi by lazy {
+        retrofit(refreshClient).create(AuthRefreshApi::class.java)
+    }
+
+    /**
+     * 用 refresh_token 换一个新的 access_token；失败返回 null。
+     *
+     * 放在 ApiClient 而不是 TokenAuthenticator 里，是因为它依赖 Retrofit 实例，
+     * 而 Retrofit 实例统一由这里装配——Authenticator 只负责「什么时候该刷、刷完怎么用」，
+     * 不负责「怎么发这个请求」，职责分开更好测。
+     *
+     * ⚠️ `.execute()` 是同步阻塞的，只能在 OkHttp 的工作线程上调用（Authenticator 回调满足这一点）。
+     */
+    fun refreshAccessToken(refreshToken: String): String? {
+        return try {
+            val response = refreshApi.refresh(RefreshRequest(refreshToken)).execute()
+            val body = response.body()
+            if (body != null && body.isSuccess) {
+                body.data?.accessToken?.takeIf { it.isNotBlank() }
+            } else {
+                // ⚠️ HTTP 非 2xx 时 Retrofit 的 body() 是 null，真正的错误信息在 errorBody() 里。
+                // 只打 body?.code 会得到一片 null，等于没打。
+                val errorText = runCatching { response.errorBody()?.string()?.take(120) }.getOrNull()
+                Log.w(
+                    TAG,
+                    "刷新 token 被拒：HTTP ${response.code()} " +
+                        "body=${body?.code}/${body?.message} err=$errorText"
+                )
+                null
+            }
+        } catch (e: Exception) {
+            // 网络异常同样算续期失败：宁可让用户重新登录，也不要把他卡在「一直转圈」
+            Log.w(TAG, "刷新 token 异常：${e.javaClass.simpleName} ${e.message}")
+            null
+        }
+    }
+
+    private const val TAG = "ApiClient"
 }

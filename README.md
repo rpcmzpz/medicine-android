@@ -31,7 +31,7 @@
 
 | 模块 | 已实现 |
 |---|---|
-| 认证 | 登录、JWT Bearer 自动注入、401 自动清理会话并退回登录页、退出登录清空返回栈 |
+| 认证 | 登录、JWT Bearer 自动注入、**access_token 过期自动用 refresh_token 续期并重放请求**、续期失败才清会话退登录页、退出登录清空返回栈 |
 | 药品列表 | 分页加载（20 条/页）、触底自动加载、下拉刷新、已售数量、处方药角标、图片缺失时用药品名首字占位 |
 | 药品详情 | 价格与原价、库存、OTC/处方药标签、批准文号、说明书、用户评价、数量步进器、加入购物车 |
 | 购物车 | 数量增减（乐观更新 + 400ms 防抖）、删除、金额实时汇总、含处方药提示、首页顶栏件数角标 |
@@ -49,7 +49,7 @@ data/
  ├─ remote/     ApiService（Retrofit 声明）+ ApiClient（OkHttp）+ ApiCall（异常收敛）
  ├─ repository/ 组合接口调用，对上层只返回 ApiResult
  ├─ model/      与后端 JSON 一一对应的数据类
- └─ local/      TokenStore（SharedPreferences）
+ └─ local/      TokenStore（SharedPreferences）+ TokenProvider（令牌读写抽象）
 ```
 
 数据流是单向的：
@@ -60,7 +60,7 @@ data/
         _uiState.update { copy(...) }  →  Compose 重组
 ```
 
-### 三个关键取舍
+### 四个关键取舍
 
 **1. 用 `ApiResult` 把「HTTP 异常」和「业务失败」收敛成一种类型**
 
@@ -92,6 +92,34 @@ sealed interface ApiResult<out T> {
 下单只传购物车项 id 和地址 id，金额、库存、优惠全部由后端算；支付成功后重新拉详情，而不是本地改状态。
 代价是多一次请求，好处是永远不会出现「客户端显示 ¥50.50、实际扣款 ¥52」这类对不上账的问题。
 
+**4. token 续期交给 OkHttp 的 `Authenticator`，不自己写重试**
+
+后端 access_token 2 小时过期、refresh_token 7 天过期。第一版是「401 就清 token 退登录页」——
+功能没错，但用户开着 App 放一会儿回来就得重新登录一次，很蠢。
+
+现在把续期交给 OkHttp 专门留的 `Authenticator` 回调：
+
+```kotlin
+class TokenAuthenticator : Authenticator {
+    override fun authenticate(route: Route?, response: Response): Request? {
+        // 已经重试过一轮还是 401 -> 新 token 也不被接受，放弃
+        if (responseCount(response) >= 2) return null
+        // ...换 token，返回带新 Authorization 的原请求
+    }
+}
+```
+
+三个容易踩的点：
+
+1. **401 的处理层在应用拦截器的内层**，所以 `AuthInterceptor` 拿到的已经是「重试后的最终响应」。
+   续期成功 → 最终 200 → 不清 token；续期失败 → 最终仍是 401 → 才清 token。分工天然就对上了。
+2. **并发要加锁 + 双重检查**：列表刷新和购物车加载可能同时 401，不能各自去换 token。
+   排队期间若发现本地 token 已与失败请求里的不一致，说明别的线程已经换过，直接复用、不发第二次刷新。
+3. **刷新请求必须走独立的 client**，不能带 `Authenticator`——否则刷新接口自己 401 时会无限递归。
+
+顺带暴露了一个原本没注意的问题：上传处方用的 body 是一次性流，**重放时流已被读空会报 `Stream Closed`**。
+改成 body 持有 `Uri`、每次 `writeTo()` 重新开流，就变成可重放的了（详见下面的排障表）。
+
 ## 目录
 
 ```
@@ -99,14 +127,18 @@ app/src/main/java/com/zhuhai/medicine/
 ├── MedicineApplication.kt        # 进程级初始化 TokenStore
 ├── MainActivity.kt
 ├── data/
-│   ├── local/TokenStore.kt
+│   ├── local/
+│   │   ├── TokenStore.kt           # SharedPreferences 存会话
+│   │   └── TokenProvider.kt        # 令牌读写抽象（让续期逻辑可单测）
 │   ├── model/                    # ApiResponse、Auth、Medicine、Cart、Order、Prescription、User
 │   ├── remote/
-│   │   ├── ApiClient.kt          # OkHttp（普通请求 / 上传请求两个 client）
+│   │   ├── ApiClient.kt          # OkHttp（普通 / 上传 / 刷新三个 client）
 │   │   ├── ApiService.kt         # 24 个接口声明
+│   │   ├── AuthRefreshApi.kt      # 同步版刷新接口（Authenticator 回调不是挂起函数）
 │   │   ├── ApiResult.kt
 │   │   ├── ApiCall.kt            # 异常 → ApiResult
-│   │   └── AuthInterceptor.kt    # 注入 Bearer，401 清会话
+│   │   ├── AuthInterceptor.kt    # 注入 Bearer；最终仍是 401 才清会话
+│   │   └── TokenAuthenticator.kt # 401 → 换 token → 重放
 │   └── repository/               # 6 个 Repository
 └── ui/
     ├── AppNavHost.kt             # 路由表 + 返回栈控制
@@ -172,6 +204,7 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 |---|---|---|
 | 所有接口 10s 超时，但 `ping 10.0.2.2` 正常 | Android 16 新增 `ACCESS_LOCAL_NETWORK` 运行时权限，未授予时 SYN 被静默丢弃；shell 的 uid 不受该限制，所以命令行看着是通的 | Manifest 声明 + 首次进入列表页时申请，拒绝则展示引导页 |
 | 上传处方报 `IOException: Stream Closed` | 日志拦截器 `Level.BODY` 会先 `writeTo(buffer)` 读一遍 body；流式 `RequestBody` 只能读一次，真正发包时已关闭 | 上传单独用一个 `Level.BASIC` 的 OkHttpClient，仍保留请求行/状态码/耗时 |
+| token 过期后上传处方报 `Stream Closed` | 401 自动续期后 OkHttp 会**重放**请求，而上传 body 是一次性流，重放时流已读空 | body 从「持有 InputStream」改成「持有 Uri，每次 `writeTo()` 重新开流」→ body 可重放 |
 | 地址列表解析出 `addressId = 0`，结算页永远选不中地址 | 该接口手工拼 Map 返回**驼峰**，其余接口是**蛇形**，命名策略不一致 | `@SerializedName(value = "addressId", alternate = ["address_id"])` 同时兼容 |
 | 新增地址报 `ClassCastException: Integer cannot be cast to Boolean` | 后端 `is_default` 用 `Boolean` 接收，客户端传了 `1` | 请求体字段改为 `Boolean` |
 | 购物车连点 3 次 `+` 发出 3 个 PATCH | 没有合并请求 | 乐观更新 UI + 每个 cartId 一个 `Job`，400ms 内的新操作取消上一个 |
@@ -184,28 +217,34 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 
 ## 测试
 
-24 个 JVM 单元测试（业务相关 17 个，另有 6 个 Kotlin 语法练习、1 个模板用例），全部通过，不需要模拟器：
+30 个 JVM 单元测试（业务相关 23 个，另有 6 个 Kotlin 语法练习、1 个模板用例），全部通过，不需要模拟器：
 
 ```bash
 ./gradlew :app:testDebugUnitTest
 ```
 
-覆盖三类容易出错、又不需要真机的逻辑：
+覆盖四类容易出错、又不需要真机的逻辑：
 
 - **JSON 映射**：蛇形/驼峰两种键、`data: null` 的写接口、金额精度、日期字符串；
 - **`ApiCall` 分支**：HTTP 401 → `Unauthorized`、业务 code 非 200 → `BusinessError`、IO 异常 → `NetworkError`；
-- **状态机规则**：哪些状态可支付、可取消，与后端 `pay` / `cancel` 的校验保持一致。
+- **状态机规则**：哪些状态可支付、可取消，与后端 `pay` / `cancel` 的校验保持一致；
+- **token 续期决策**：续期成功用新 token 重放、并发时复用别人换好的 token 不重复刷新、
+  刷新失败不重试、没有 refresh_token 不重试、已重试过一轮就放弃、重放请求只带一个 `Authorization` 头。
+
+最后这组用假的 `TokenProvider` 和假的刷新函数驱动，不连服务器——这些分支在真机上要等 token 真的过期才触发，
+恰恰是最容易写错、又最难靠手点覆盖的部分。
 
 ## 已知限制
 
 这些是有意留下的边界，不是「没发现」：
 
 - **注册 UI 未做**：`AuthRepository.register()` 已实现，只差页面；测试账号需用接口创建。
-- **refresh_token 未自动续期**：Token 已持久化，但 401 时直接退回登录页，没有先尝试刷新。
 - **搜索/分类/筛选未接 UI**：后端列表接口支持 `keyword` / `category_id` / `sort_by` / `drug_type`，客户端只用了分页。
 - **无离线缓存**：断网时列表与详情直接报错，没有 Room 落库。
 - **支付是模拟支付**：后端返回流水号，不接真实支付渠道。
 - **处方驳回未联动退款**：订单会变为已取消并释放库存，但 `payments` 记录仍是成功状态。
+- **续期是「被动」的**：只在收到 401 时才刷新，没有在过期前主动续；
+  另外后端不轮换 refresh_token，它 7 天到期后只能重新登录。
 
 ## 关于这个项目
 
