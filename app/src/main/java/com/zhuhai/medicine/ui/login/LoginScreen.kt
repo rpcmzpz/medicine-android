@@ -78,7 +78,7 @@ fun LoginContent(
         verticalArrangement = Arrangement.Center
     ) {
         Text(
-            text = "药品商城",
+            text = "药到家",
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
