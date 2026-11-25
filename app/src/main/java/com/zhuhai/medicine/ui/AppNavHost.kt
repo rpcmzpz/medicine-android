@@ -42,10 +42,20 @@ fun AppNavHost() {
         if (TokenStore.isLoggedIn) Routes.HOME else Routes.LOGIN
     }
 
-    /** token 失效：清空整个返回栈回登录页，避免用户按返回又回到需要登录的页面 */
+    /*
+     * token 失效：清空整个返回栈回登录页，避免用户按返回又回到需要登录的页面。
+     *
+     * ⚠️ 这里必须用 `navController.graph.id`，不能用字面量 0：
+     * `popUpTo(0)` 能生效只是因为 Compose 的 NavHost 没传 route 时根图 id 恰好是 0，
+     * 这是 Navigation 的内部实现细节、没有文档保证；一旦给 NavHost 传了 route，
+     * 根图 id 变成 route.hashCode()，这行就**静默失效**——只留一行
+     * "Ignoring popBackStack to destination ... as it was not found on the current back stack"，
+     * 返回栈不会被清，用户按返回键又回到需要登录的页面。
+     * `navController.graph.id` 永远指向真正的根图，语义明确且不会失效。
+     */
     val backToLogin: () -> Unit = {
         navController.navigate(Routes.LOGIN) {
-            popUpTo(0) { inclusive = true }
+            popUpTo(navController.graph.id) { inclusive = true }
         }
     }
 
@@ -69,8 +79,11 @@ fun AppNavHost() {
                 onOpenCart = { navController.navigate(Routes.CART) },
                 onOpenOrders = { navController.navigate(Routes.ORDERS) },
                 onLogout = {
+                    // 主动退出登录同样要清空返回栈：否则从购物车/订单返回还能回到已登录态的页面。
+                    // 用 graph.id 而不是 Routes.HOME——HOME 未必在栈底（从详情页退出时栈底是别的），
+                    // 而 graph.id 永远指向根图，弹它等于清空整栈。
                     navController.navigate(Routes.LOGIN) {
-                        popUpTo(Routes.HOME) { inclusive = true }
+                        popUpTo(navController.graph.id) { inclusive = true }
                     }
                 }
             )

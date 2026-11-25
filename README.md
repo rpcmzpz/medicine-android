@@ -32,7 +32,7 @@
 | 模块 | 已实现 |
 |---|---|
 | 认证 | 登录、JWT Bearer 自动注入、**access_token 过期自动用 refresh_token 续期并重放请求**、续期失败才清会话退登录页、退出登录清空返回栈 |
-| 药品列表 | 分页加载（20 条/页）、触底自动加载、下拉刷新、已售数量、处方药角标、图片缺失时用药品名首字占位 |
+| 药品列表 | **分页加载（20 条/页）、触底自动加载下一页、下拉刷新**、已售数量、处方药角标、图片缺失时用药品名首字占位 |
 | 药品详情 | 价格与原价、库存、OTC/处方药标签、批准文号、说明书、用户评价、数量步进器、加入购物车 |
 | 购物车 | 数量增减（乐观更新 + 400ms 防抖）、删除、金额实时汇总、含处方药提示、首页顶栏件数角标 |
 | 结算 | 收货地址切换/新增、订单备注、处方卡片、商品/运费/实付明细、提交前校验 |
@@ -139,13 +139,28 @@ app/src/main/java/com/zhuhai/medicine/
 │   │   ├── ApiCall.kt            # 异常 → ApiResult
 │   │   ├── AuthInterceptor.kt    # 注入 Bearer；最终仍是 401 才清会话
 │   │   └── TokenAuthenticator.kt # 401 → 换 token → 重放
-│   └── repository/               # 6 个 Repository
+│   └── repository/               # 6 个 Repository + MedicineListSource（列表数据源抽象）
 └── ui/
     ├── AppNavHost.kt             # 路由表 + 返回栈控制
     ├── login/ home/ medicine/ detail/ cart/ checkout/ order/
     ├── permission/               # Android 16+ 本地网络权限申请
     └── common/                   # 金额/日期格式化、multipart 构造
 ```
+
+### 列表分页是怎么做的
+
+三个列表页（药品 / 购物车 / 订单）共用同一套模式：
+
+- **数据源抽象**：ViewModel 只依赖 `MedicineListSource.list(page, pageSize)`，
+  不直接碰 Retrofit，所以分页逻辑能在 JVM 单测里跑（见下）。
+- **累加而非替换**：`loadMore()` 把新一页 append 到列表尾部；`hasMore` 由
+  `已加载条数 < total` 决定，不靠请求返回空来判断。
+- **触发点**：列表底部放一个「加载中」item，它被组合出来就说明用户滚到底了，
+  在 item 里写 `LaunchedEffect(page)` 触发下一页——不用自己算可见下标。
+- **并发防护**：`isLoading / isRefreshing / isLoadingMore / hasMore` 四个条件缺一不可，
+  连续快速触底不会把同一页请求两遍。
+- **刷新与在途请求互斥**：下拉刷新会取消还在飞的「加载更多」，
+  否则旧的一页会追加到新列表后面，出现重复药品。
 
 ## 运行
 
@@ -156,15 +171,24 @@ MySQL 8 + Redis，`mvn spring-boot:run` 监听 3000 端口。
 
 ### 2. 配置后端地址
 
-`data/remote/ApiClient.kt`：
+地址不再硬编码在 Kotlin 源码里，而是通过 Gradle 属性注入（`BuildConfig.API_BASE_URL`）。
+默认值是模拟器访问宿主的地址：
 
-```kotlin
-private const val BASE_URL = "http://10.0.2.2:3000/"
+```
+apiBaseUrl=http://10.0.2.2:3000/
 ```
 
 - `10.0.2.2` 是 Android 模拟器访问宿主机的固定网关地址；
-- **真机调试改成电脑的局域网 IP**（如 `http://192.168.1.10:3000/`），手机与电脑同一 WiFi；
+- **真机调试传电脑的局域网 IP**（如 `http://192.168.1.10:3000/`），手机与电脑同一 WiFi：
+
+  ```bash
+  ./gradlew :app:assembleDebug -PapiBaseUrl=http://192.168.1.10:3000/
+  ```
+
+  也可以写进根目录 `gradle.properties` 长期生效：`apiBaseUrl=http://192.168.1.10:3000/`
 - 末尾斜杠不能省，否则 Retrofit 拼出的路径会少一段。
+
+> 换环境不用改代码，也不用重新改 `ApiClient.kt` —— 改地址只动这一处。
 
 ### 3. 编译运行
 
@@ -217,29 +241,33 @@ curl -X POST http://localhost:3000/api/v1/auth/register \
 
 ## 测试
 
-30 个 JVM 单元测试（业务相关 23 个，另有 6 个 Kotlin 语法练习、1 个模板用例），全部通过，不需要模拟器：
+39 个 JVM 单元测试（业务相关 32 个，另有 6 个 Kotlin 语法练习、1 个模板用例），全部通过，不需要模拟器：
 
 ```bash
 ./gradlew :app:testDebugUnitTest
 ```
 
-覆盖四类容易出错、又不需要真机的逻辑：
+覆盖五类容易出错、又不需要真机的逻辑：
 
 - **JSON 映射**：蛇形/驼峰两种键、`data: null` 的写接口、金额精度、日期字符串；
 - **`ApiCall` 分支**：HTTP 401 → `Unauthorized`、业务 code 非 200 → `BusinessError`、IO 异常 → `NetworkError`；
 - **状态机规则**：哪些状态可支付、可取消，与后端 `pay` / `cancel` 的校验保持一致；
 - **token 续期决策**：续期成功用新 token 重放、并发时复用别人换好的 token 不重复刷新、
   刷新失败不重试、没有 refresh_token 不重试、已重试过一轮就放弃、重放请求只带一个 `Authorization` 头。
+- **列表分页**：页码从 1 开始、触底是追加不是替换、连续触发不会请求同一页两遍、
+  加载更多失败时保留旧数据、刷新会回到第一页并丢弃在途的下一页结果。
 
-最后这组用假的 `TokenProvider` 和假的刷新函数驱动，不连服务器——这些分支在真机上要等 token 真的过期才触发，
-恰恰是最容易写错、又最难靠手点覆盖的部分。
+后两组用假的 `TokenProvider`、假的刷新函数和假的药品数据源驱动，不连服务器——
+这些分支在真机上要等 token 真的过期、或手滑快速滚动才触发，恰恰是最容易写错、又最难靠手点覆盖的部分。
+为此给药品列表抽了 `MedicineListSource` 接口，让 ViewModel 不直接依赖 Retrofit。
 
 ## 已知限制
 
 这些是有意留下的边界，不是「没发现」：
 
 - **注册 UI 未做**：`AuthRepository.register()` 已实现，只差页面；测试账号需用接口创建。
-- **搜索/分类/筛选未接 UI**：后端列表接口支持 `keyword` / `category_id` / `sort_by` / `drug_type`，客户端只用了分页。
+- **搜索/分类/筛选未接 UI**：后端列表接口支持 `keyword` / `category_id` / `sort_by` / `drug_type`，
+  客户端只做了分页，这几个筛选条件还留在 `MedicineRepository.list()` 的参数上没接到界面。
 - **无离线缓存**：断网时列表与详情直接报错，没有 Room 落库。
 - **支付是模拟支付**：后端返回流水号，不接真实支付渠道。
 - **处方驳回未联动退款**：订单会变为已取消并释放库存，但 `payments` 记录仍是成功状态。

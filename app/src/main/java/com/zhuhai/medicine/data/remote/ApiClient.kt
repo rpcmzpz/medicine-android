@@ -24,12 +24,15 @@ object ApiClient {
      * 少了会直接抛 IllegalArgumentException: baseUrl must end in /。
      *
      * 10.0.2.2 是 Android 模拟器访问**宿主机**的固定回环地址；
-     * 真机 / 外部设备访问不到，需换成电脑的局域网 IP。
+     * 真机 / 外部设备访问不到，需用命令行参数覆盖：
+     *   ./gradlew :app:assembleDebug -PapiBaseUrl=http://192.168.1.10:3000/
+     *
+     * 地址不再硬编码在源码里，而是从 BuildConfig 读——换环境不用改代码。
      */
     /** 对外暴露的站点根地址（无尾斜杠），用于拼接后端返回的相对图片路径 */
-    const val ORIGIN = "http://10.0.2.2:3000"
+    val ORIGIN: String = BuildConfig.API_BASE_URL.trimEnd('/')
 
-    private const val BASE_URL = "$ORIGIN/"
+    private val BASE_URL = BuildConfig.API_BASE_URL
 
     private fun logLevel(body: Boolean): HttpLoggingInterceptor.Level = when {
         !BuildConfig.DEBUG -> HttpLoggingInterceptor.Level.NONE

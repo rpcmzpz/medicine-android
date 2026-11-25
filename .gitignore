@@ -21,3 +21,8 @@ build/
 *.apk
 *.aab
 *.hprof
+
+# 正式签名信息与 keystore 本体绝不入库（build.gradle.kts 的 release 签名读 keystore.properties）
+keystore.properties
+*.jks
+*.keystore

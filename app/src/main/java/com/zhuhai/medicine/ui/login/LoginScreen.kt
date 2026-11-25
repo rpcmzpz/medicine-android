@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -72,7 +73,11 @@ fun LoginContent(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            // 键盘弹出时把内容顶上去，别让输入框被键盘盖住
             .imePadding()
+            // MainActivity 开了 enableEdgeToEdge()，内容会画到状态栏/导航栏下面。
+            // 这里手动吃掉系统栏 inset，避免标题被状态栏遮住、底部按钮被导航条盖住。
+            .safeDrawingPadding()
             .padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
@@ -169,7 +174,9 @@ fun LoginContent(
 private fun LoginPreview() {
     MedicineAppTheme {
         LoginContent(
-            state = LoginUiState(username = "zhuhai001", password = "12345678"),
+            // ⚠️ 这里不要写真实测试账号：Preview 会把输入框内容画进预览图，
+            // 截图一旦外传就等于把可登录的账号密码公开了。用占位数据。
+            state = LoginUiState(username = "请输入用户名", password = ""),
             onUsernameChange = {},
             onPasswordChange = {},
             onSubmit = {}
