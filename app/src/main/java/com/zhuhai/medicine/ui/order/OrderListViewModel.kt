@@ -177,7 +177,13 @@ class OrderListViewModel @JvmOverloads constructor(
 
     private fun finishWithError(text: String) {
         _uiState.update {
-            it.copy(isLoading = false, isRefreshing = false, errorMessage = text)
+            // 订单列表非空时不能把整页替换成错误页，否则用户刚加载完的订单全没了；
+            // 这种情况用 Snackbar 提示一句「刷新失败」，旧数据继续留着。
+            if (it.orders.isEmpty()) {
+                it.copy(isLoading = false, isRefreshing = false, errorMessage = text)
+            } else {
+                it.copy(isLoading = false, isRefreshing = false, message = text)
+            }
         }
     }
 }

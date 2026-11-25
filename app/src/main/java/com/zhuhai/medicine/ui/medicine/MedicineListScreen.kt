@@ -23,11 +23,14 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,15 +55,29 @@ import java.math.BigDecimal
 @Composable
 fun MedicineListScreen(
     onItemClick: (Long) -> Unit,
+    onSessionExpired: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: MedicineListViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val hasLocalNetworkPermission = rememberLocalNetworkPermission()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     // 权限就绪后再发请求；被拒绝时停在这里，避免无意义的超时等待
     LaunchedEffect(hasLocalNetworkPermission) {
         if (hasLocalNetworkPermission) viewModel.loadOnce()
+    }
+
+    // 已经有数据之后的失败（下拉刷新失败、加载更多失败）走 Snackbar：
+    // 屏幕上的列表还在，用户需要知道「这次没刷新成功」而不是以为刷新成功了
+    LaunchedEffect(state.message) {
+        val message = state.message ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.consumeMessage()
+    }
+
+    LaunchedEffect(state.sessionExpired) {
+        if (state.sessionExpired) onSessionExpired()
     }
 
     if (!hasLocalNetworkPermission) {
@@ -68,12 +85,27 @@ fun MedicineListScreen(
         return
     }
 
-    MedicineListContent(
-        state = state,
-        onRefresh = viewModel::refresh,
-        onItemClick = onItemClick,
-        modifier = modifier
-    )
+    /*
+     * 这里不能再套一层 Scaffold：本组件是嵌在 HomeScreen 的 Scaffold 内容区里的，
+     * 嵌套 Scaffold 会各自算一遍 insets，底部 Snackbar 会被顶到导航条下面。
+     * 改成 Box 覆盖层，Snackbar 直接贴在内容区底部。
+     */
+    Box(modifier = modifier.fillMaxSize()) {
+        MedicineListContent(
+            state = state,
+            onRefresh = viewModel::refresh,
+            onLoadMore = viewModel::loadMore,
+            onItemClick = onItemClick,
+            modifier = Modifier.fillMaxSize()
+        )
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 12.dp)
+        )
+    }
 }
 
 /**
@@ -85,6 +117,7 @@ fun MedicineListScreen(
 fun MedicineListContent(
     state: MedicineListUiState,
     onRefresh: () -> Unit,
+    onLoadMore: () -> Unit,
     onItemClick: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -108,9 +141,51 @@ fun MedicineListContent(
                 items(items = state.items, key = { it.medicineId }) { medicine ->
                     MedicineRow(medicine = medicine, onClick = { onItemClick(medicine.medicineId) })
                 }
+
+                if (state.hasMore) {
+                    item(key = "load_more") {
+                        // page 变化才重新触发，避免每帧重组都请求一次
+                        LaunchedEffect(state.page) { onLoadMore() }
+                        LoadMoreFooter()
+                    }
+                } else {
+                    item(key = "no_more") { NoMoreHint() }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun LoadMoreFooter() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "正在加载更多…",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun NoMoreHint() {
+    Text(
+        text = "没有更多药品了",
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+    )
 }
 
 @Composable
@@ -298,6 +373,7 @@ private fun MedicineListPreview() {
                     )
                 ),
                 onRefresh = {},
+                onLoadMore = {},
                 onItemClick = {}
             )
         }

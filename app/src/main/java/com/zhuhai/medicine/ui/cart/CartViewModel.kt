@@ -70,13 +70,8 @@ class CartViewModel @JvmOverloads constructor(
                     )
                 }
 
-                is ApiResult.BusinessError -> _uiState.update {
-                    it.copy(isLoading = false, isRefreshing = false, errorMessage = result.message)
-                }
-
-                is ApiResult.NetworkError -> _uiState.update {
-                    it.copy(isLoading = false, isRefreshing = false, errorMessage = result.message)
-                }
+                is ApiResult.BusinessError -> finishWithError(result.message)
+                is ApiResult.NetworkError -> finishWithError(result.message)
 
                 ApiResult.Unauthorized -> {
                     TokenStore.clear()
@@ -176,6 +171,20 @@ class CartViewModel @JvmOverloads constructor(
 
     private fun showMessage(text: String) {
         _uiState.update { it.copy(message = text) }
+    }
+
+    /**
+     * 统一收口失败：购物车为空 → 整屏错误页；购物车已有数据 → Snackbar 提示，不清空屏幕。
+     * 只设 errorMessage 的话，列表非空时错误没人消费 → 断网下拉刷新会静默失败。
+     */
+    private fun finishWithError(text: String) {
+        _uiState.update {
+            if (it.items.isEmpty()) {
+                it.copy(isLoading = false, isRefreshing = false, errorMessage = text)
+            } else {
+                it.copy(isLoading = false, isRefreshing = false, message = text)
+            }
+        }
     }
 
     fun consumeMessage() {

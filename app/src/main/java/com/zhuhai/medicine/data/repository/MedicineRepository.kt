@@ -15,13 +15,25 @@ import com.zhuhai.medicine.data.remote.apiCall
  */
 class MedicineRepository(
     private val api: ApiService = ApiClient.api
-) {
+) : MedicineListSource {
 
     /**
      * @param sortBy price_asc | price_desc | sales_desc，其他值按创建时间倒序
      * @param drugType 0=OTC 1=处方药，null=不限
      * @param pageSize 后端只认 `page_size`，传 size/limit 会被静默忽略
      */
+    override suspend fun list(page: Int, pageSize: Int): ApiResult<PageData<MedicineSummary>> =
+        apiCall {
+            api.listMedicines(
+                keyword = null,
+                categoryId = null,
+                sortBy = null,
+                page = page,
+                pageSize = pageSize,
+                drugType = null
+            )
+        }
+
     suspend fun list(
         keyword: String? = null,
         categoryId: Int? = null,

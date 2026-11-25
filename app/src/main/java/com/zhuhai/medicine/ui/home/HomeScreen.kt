@@ -95,6 +95,8 @@ fun HomeScreen(
     ) { innerPadding ->
         MedicineListScreen(
             onItemClick = onOpenDetail,
+            // 药品列表内部也会遇到 401，统一交给首页的退出登录通道处理
+            onSessionExpired = onLogout,
             modifier = Modifier.padding(innerPadding)
         )
     }
